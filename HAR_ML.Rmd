@@ -105,7 +105,7 @@ qplot(results$cutoff, results$Accuracy,xlab="correlation in percent", ylab="accu
       main="accuracy versus correlation cutoff for random forest")
 ```
 
-As can be seen in the plot of accuracy (1 - out of sample error) versus percent cutoff, random forest is fairly robust to correlated variables.  At the very highest correlations (ie above 93%) there may be a little overfitting.  Below 90% there seems to be a steady drop in accuracy.  The best performance appears to be with a cutoff around 90%, which was chosen for further model building.  As the accuracy values are from the test set, they 
+As can be seen in the plot of accuracy (1 - out of sample error) versus percent cutoff, random forest is fairly robust to correlated variables.  At the very highest correlations (ie above 93%) there may be a little overfitting.  Below 90% there seems to be a steady drop in accuracy.  The best performance appears to be with a cutoff around 90%, which was chosen for further model building.
 
 ```{r finalCorrPlot, cache=TRUE}
 #using a reasonable correlation cutoff from the above analysis prep data for further model
