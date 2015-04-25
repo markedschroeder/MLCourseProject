@@ -1,0 +1,233 @@
+---
+title: "Human Activity Recognition using Machine Learning"
+author: "Mark Schroeder"
+date: "April 21, 2015"
+output: html_document
+---
+
+### Executive Summary
+In this paper we use machine learning to build a classifier that attempts to discriminate between correct execution dumbbell biceps curls (Class A), throwing the elbows forward (Class B), lifting only halfway (Class C), lowering only halfway (Class D) and throwing the hips forward (Class E).
+
+The data is from:
+Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
+
+website:
+http://groupware.les.inf.puc-rio.br/har#weight_lifting_exercises#ixzz3XylBRzBU
+
+A number of models were tested prior to this analysis, but random forest (caret method "rf"), gradient boosting machine/stochastic gradient boosting (caret method "gbm"), and bagged CART (caret method "treebag") were chosen for further testing within the context of this report due to their clearly superior performance.  Of these gradient boosting machines performed the best.  The models tested outside this report were biased towards boosting, bagging, and random forest models as they all aggregate, average, or vote models in some fashion making them very powerful and robust to over-fitting as stated in the lectures.
+
+#### Note on report
+In the following write up I do not consider the r code and output to count towards the two thousand words so I can include it for the interested reader.  Please feel free to skim these sections as the critical features are highlighted in the text.
+
+### Data Preparation for Model Fitting
+
+I first start with a brief overview of reading in and preparing the data.
+
+#### Initialize Parallel Processing to Speed analysis
+
+```{r startParallel, cache=FALSE}
+library(doParallel)
+cluster <- makeCluster(detectCores() - 1)
+registerDoParallel(cluster)
+```
+
+#### Loading and Filtering of the Data
+The initial data has a lot of columns filled with NAs and empty strings.  These are screened out to end up with a data set containing 53 columns of 52 predictors and the outcome variables.
+```{r loadFilter, cache=TRUE}
+#load and filter data
+setwd("~/Google Drive/dataScience/PracticalMachineLearning")
+data <- read.csv("pml-training.csv", header=TRUE, stringsAsFactors=F)
+
+#filter out columns filled with NA and ""
+data <- Filter(function(x)sum(is.na(x)|(x==""))<0.1*length(x), data)
+#because data was read in with stringsAsFactors=F need to make classe a factor variable
+data$classe <- as.factor(data$classe)
+
+#remove first seven columns, because they aren't accelerometer based
+data <- data[,-c(1:7)]
+```
+
+#### Subsetting the Data and Removal of Highly Correlated Variables
+In my design I will split the data into build (training+testing) and validation sets.  The build data will be used for model selection, while the validation set will be used for getting a clean estimate of the out of sample error.  The final sets are generated below after a brief analysis of whether highly correlated variables lead to overfitting with random forests.  This analysis was done with random forests because they were faster to train than gradient boosting machines.  Since I used gradient boosting machines in the end, this analysis should optimally be rerun with gradient boosting machines.
+
+#### Subsetting
+```{r makeSets, cache=TRUE}
+#generate general data partitions
+library(caret)
+set.seed(333)
+inBuild <- createDataPartition(y=data$classe,p=0.7, list=FALSE)
+buildData <- data[inBuild,]
+inTrain <- createDataPartition(y=buildData$classe, p=0.7, list=FALSE)
+```
+
+#### Generate Correlation Plot
+```{r correlationPlot, cache=TRUE}
+#create correlation matrix and vizualize
+traindata <- buildData[inTrain,]
+corMatrix <- cor(traindata[,1:52])
+library("corrplot") #package corrplot
+corrplot(corMatrix, method = "circle") #plot matrix
+```
+<br>
+Correlation plot: circles for each pair of variables are scaled in size based on absolute correlation and colored based on how positively or negatively correlated.  Most variables are not that correlated, but some cross correlation is clear by the off diagonal components.
+
+#### Random Forest Across a Range of Correlation Cutoffs
+Here we fit just one random forest with the mtry tuning parameter set to 6.  Optimizing for every cutoff was infeasible and might add variability to the trend in accuracy versus correlation cutoff.
+```{r corrRangeTest, cache=TRUE}
+#generate cutoff range
+cutoff <- c(50,60,70,80,85:99)
+results <- data.frame(cutoff=cutoff,Accuracy=c(rep.int(0,19)))
+ctrl <- trainControl(method = "cv", number = 4)
+
+for (cut in cutoff) {
+  #get a list of column names to keep by removing all with correlations above cutoff
+  keep <- colnames(traindata)[-c(findCorrelation(corMatrix, cutoff=cut/100))]
+
+  #subset data
+  training <- buildData[inTrain,keep]
+  testing <- buildData[-inTrain,keep]
+
+  #to speed multiple runs keep mtry to 6, we just want the general relationship between
+  #the correlation of variables and accuracy: can we minimize overfitting?
+  rfGrid <- expand.grid(mtry=(6))
+  
+  #fit model
+  rfFit <- train(classe ~ ., method="rf", data=training, trControl = ctrl, tuneGrid = rfGrid)
+
+  #build list of results
+  results$Accuracy[results$cutoff == cut] <- confusionMatrix(testing$classe,
+                                            predict(rfFit,testing))$overall["Accuracy"]
+
+}
+
+#plot results
+qplot(results$cutoff, results$Accuracy,xlab="correlation in percent", ylab="accuracy", 
+      main="accuracy versus correlation cutoff for random forest")
+```
+
+As can be seen in the plot of accuracy (1 - out of sample error) versus percent cutoff, random forest is fairly robust to correlated variables.  At the very highest correlations (ie above 93%) there may be a little overfitting.  Below 90% there seems to be a steady drop in accuracy.  The best performance appears to be with a cutoff around 90%, which was chosen for further model building.  As the accuracy values are from the test set, they 
+
+```{r finalCorrPlot, cache=TRUE}
+#using a reasonable correlation cutoff from the above analysis prep data for further model
+#building
+keep <- colnames(traindata)[-c(findCorrelation(corMatrix, cutoff=0.90))]
+#plot new correlation matrix to show reduced correlation
+corMatrix <- cor(traindata[,keep[1:length(keep)-1]])
+corrplot(corMatrix, method = "circle") #plot matrix
+```
+<br>
+The final correlation plot (as described above).  The structure is still fairly similar with some pairs, such as mag_belt_y and mag_belt_z, still remaining although the 7 most correlated variables were removed.
+
+#### Generate Final Training and Testing Sets
+Split the data and subset with the variables having a correlation less than 0.9 with the other variables.
+```{r splitData, cache=TRUE}
+#generate data sets to use after correlation analysis
+training <- buildData[inTrain,keep]
+testing <- buildData[-inTrain,keep]
+validation <-data[-inBuild,keep]
+```
+
+### Model Training and Selection
+Here I fit the random forest (method="rf"), gradient boosting machine (method="gbm"), and bagged CART (method="treebag").  In all cases I pass method = "cv" with number = 10 using the trainControl method and trControl parameter of the train method.  This makes train do 10 fold cross validation and choose the best method based on the Accuracy parameter (I stayed with the default as it is 1- error rate and the assignment says to use error rate).  I then compare the best version of each of the three methods using the held out testing data.  To get a true estimate of the out of sample error, I then calculate the accuracy on the completely held out validation set.
+
+#### random forest
+Random forest has one tunable parameter, mtry, the number of variables used to split the data at each tree node.  Here I try all multiples of 3 from 3 to 30.  As overfitting is a concern, this seems like a generous range (preferring to not include too many parameters or variables per split)
+
+```{r randomforest, cache=TRUE}
+#this block generates the random forest fit
+
+#set up tuning grid for mtry values to optimize the random forest fit
+rfGrid <-  expand.grid(mtry=(1:10)*3)
+
+#set up 10 fold cross validation for training control
+ctrl <- trainControl(method = "cv", number = 10)
+
+#fit the random forest model
+rfFit <- train(classe ~ ., method="rf", data=training, trControl = ctrl, tuneGrid = rfGrid)
+
+#print fit
+rfFit
+```
+
+As can be seen in the above output the best mtry value is found to be 12, which yields an average accuracy of 0.989 across the 10 cross validation folds.  A rough estimate of the 95% confidence limits on the expected out of sample error (using 1-accuracy) is given by mean +/- 2*sd, which yields 0.003 to 0.018.  
+
+```{r randomForestConfusion, cache=TRUE}
+#print confustion matrix for random forest
+confusionMatrix(testing$classe, predict(rfFit,testing))
+```
+
+The out of sample accuracy turns out to be 0.9898, or out of sample error of 0.0102, which falls within the range of 0.003 to 0.018 expected from the distribution seen in cross-validation.
+
+#### gradient boosting machine
+Gradient boosting machines have 3 tunable parameters interaction.depth, n.trees, and shrinkage.  Using the trControl parameter of train, all combinations of interaction.depth = 5 or 9, n.trees = 750, 1000, 1250, or 1500, and shrinkage set to 0.1 are tested.  This general range of parameters was taken from an example on the internet.  Because the best fit is within the chosen range and not edge values, it seems like a reasonable choice.
+
+```{r gbm, cache=TRUE}
+#this block generates the stochastic gradient boosting/gradient boosting machine fit
+#set up tuning grid for optimizing gbm parameters
+gbmGrid <-  expand.grid(interaction.depth = c(5, 9),
+                        n.trees = 500+(1:4)*250,
+                        shrinkage = 0.1)
+
+#use 10 fold cross validation
+ctrl <- trainControl(method = "cv", number = 10)
+
+#fit gbm model
+gbmFit <- train(classe ~ ., data = training, method = "gbm", trControl = ctrl, verbose = FALSE,
+                tuneGrid = gbmGrid)
+
+#print gbm fit
+gbmFit
+```
+
+As can be seen from the output, the best results found are with interaction.depth = 9, n.trees = 1250, and shrinkage = 0.1.  The range of out of sample error, as estimated above, is 0 to 0.012.
+
+```{r gbmConfusion, cache=TRUE}
+#print confusion matrix for the gbm fit
+confusionMatrix(testing$classe,predict(gbmFit,testing))
+```
+The out of sample accuracy turns out to be 0.9925, or out of sample error of 0.0075, which falls within the range of 0 to 0.012 expected from the distribution seen in cross-validation.  The error of 0.0075 is slightly better (lower) than that of random forest (0.0102).
+
+#### bagged CART model
+The bagged CART model has no tunable parameters, but still performs relatively well.
+```{r treebag, cache=TRUE}
+# fit bagged CART model
+
+#no tuning grid, because no tunable parameters
+#use 10 fold cross validation
+ctrl <- trainControl(method = "cv", number = 10)
+
+tbFit <- train(classe ~ ., data=training, method="treebag", trControl = ctrl)
+
+#print bagged CART fit
+tbFit
+```
+
+The error rate range is 0.017 to 0.04, which is still quite good, but worse than either random forest or gradient boosting machines.
+
+```{r treebagConfusion, cache=TRUE}
+#print confusion matrix for bagged CART fit
+confusionMatrix(testing$classe,predict(tbFit,testing))
+```
+
+The actual out of sample error is 0.0221, which is the worst of all three models testing.
+
+#### Final estimate of Out of Sample Error
+Becuase multiple models were tested, one could argue that the selection of the model itself is a fitting step and that a truly unbiased estimate of the model can only be obtained by the held out validation data.  This is calculated here.
+
+```{r finalConfusion, cache=TRUE}
+#print confusion matrix for bagged CART fit
+confusionMatrix(validation$classe,predict(gbmFit,validation))
+```
+The out of sample accuracy is therefore 0.9929 or an out of sample error of 0.0071, which is even slightly better (lower) than seen on the testing (0.0075) set indicating it was a pretty good estimate of out of sample error.  As selecting between three models is only a weak fit (as opposed to selecting between tens, hundreds, or thousands of models), this is maybe not that surprising.  Given the hundreds of trees, fit in both gbm and rf each with many parameters, that model selection step obviously makes much more extensive use of the data and is therefore more prone to over fitting and misestimation.
+
+Out of curiosity predictions were made with both the gbm and rf models on the test prediction cases from the assignment, which ended up agreeing in the end as shown below.
+```{r stopParallel, cache=FALSE}
+stopCluster(cluster)
+registerDoSEQ()
+
+#for prediction keep the same variables as in the training data, but also "problem_id"
+keep <- keep[-46]
+prediction <- read.csv("pml-testing.csv", header=TRUE,  stringsAsFactors=F)
+prediction <- prediction[c(keep,"problem_id")]
+data.frame(problem_id=prediction$problem_id,prediction_gbm=predict(gbmFit,prediction),prediction_rf=predict(rfFit,prediction))
+```
